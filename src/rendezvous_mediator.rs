@@ -1340,14 +1340,50 @@ fn get_direct_port() -> i32 {
     port
 }
 
+const OPTION_DIRECT_ACCESS_BIND: &str = "direct-access-bind";
+
+// Never falls back to `listen_any`: while the address is absent (the VPN that owns it is down)
+// direct access must have no listener at all, not one on every interface.
+async fn listen_direct_bind(bind: &str, port: i32) -> ResultType<tokio::net::TcpListener> {
+    let ip: std::net::IpAddr = bind.parse()?;
+    hbb_common::tcp::new_listener(SocketAddr::new(ip, port as u16), true).await
+}
+
 async fn direct_server(server: ServerPtr) {
     let mut listener = None;
     let mut port = 0;
+    let mut bind = String::new();
     loop {
         let disabled = !option2bool(
             OPTION_DIRECT_SERVER,
             &Config::get_option(OPTION_DIRECT_SERVER),
         ) || option2bool("stop-service", &Config::get_option("stop-service"));
+        let bind_now = Config::get_option(OPTION_DIRECT_ACCESS_BIND);
+        if bind != bind_now {
+            bind = bind_now;
+            listener = None;
+        }
+        if !disabled && listener.is_none() && !bind.is_empty() {
+            port = get_direct_port();
+            match listen_direct_bind(&bind, port).await {
+                Ok(l) => {
+                    log::info!("Direct server listening on: {:?}", l.local_addr());
+                    listener = Some(l);
+                }
+                Err(err) => {
+                    hbb_common::throttled_log!(
+                        Duration::from_secs(60),
+                        warn,
+                        "Failed to bind direct server to {}, port {}: {}",
+                        bind,
+                        port,
+                        err
+                    );
+                    sleep(1.).await;
+                    continue;
+                }
+            }
+        }
         if !disabled && listener.is_none() {
             port = get_direct_port();
             match hbb_common::tcp::listen_any(port as _).await {
